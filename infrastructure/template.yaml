@@ -1,0 +1,215 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AWS Serverless BI Pipeline
+  DynamoDB → Lambda → S3 → Athena/Glue → QuickSight
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: bi-pipeline
+    Description: Prefix used for all resource names
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 300
+    MemorySize: 512
+    Environment:
+      Variables:
+        S3_BUCKET: !Ref DataBucket
+        S3_PREFIX: orders/
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RESOURCES
+# ──────────────────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── 1. DynamoDB Table ────────────────────────────────────────────────────────
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: orders-table
+      BillingMode: PAY_PER_REQUEST          # on-demand — no capacity planning needed
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES  # Lambda reads both old+new images from stream
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ── 2. S3 Bucket (Data Lake) ─────────────────────────────────────────────────
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-data-bucket-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: MoveToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA    # cheaper storage after 30 days
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ── 3. S3 Bucket for Athena Query Results ────────────────────────────────────
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-athena-results-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ── 4. IAM Role for Lambda ───────────────────────────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBStreamAndS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read DynamoDB Streams
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !GetAtt OrdersTable.StreamArn
+              # Write to S3 data lake
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${DataBucket}/*'
+
+  # ── 5. Lambda Function (DynamoDB Stream → S3) ────────────────────────────────
+  DynamoToS3Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-dynamo-to-s3'
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        DynamoDBStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt OrdersTable.StreamArn
+            StartingPosition: TRIM_HORIZON
+            BatchSize: 100
+            BisectBatchOnFunctionError: true
+      InlineCode: |
+        import boto3, json, os, datetime
+
+        s3     = boto3.client('s3')
+        BUCKET = os.environ['S3_BUCKET']
+        PREFIX = os.environ['S3_PREFIX']
+
+        def handler(event, context):
+            records = []
+            for rec in event['Records']:
+                if rec['eventName'] in ('INSERT', 'MODIFY'):
+                    image = rec['dynamodb'].get('NewImage', {})
+                    # Flatten DynamoDB typed attributes → plain dict
+                    item = {k: list(v.values())[0] for k, v in image.items()}
+                    records.append(item)
+
+            if not records:
+                return {'statusCode': 200, 'body': 'No new/modified records'}
+
+            ts  = datetime.datetime.utcnow().strftime('%Y/%m/%d/%H%M%S%f')
+            key = f"{PREFIX}{ts}.json"
+            body = '\n'.join(json.dumps(r) for r in records)   # newline-delimited JSON
+
+            s3.put_object(Bucket=BUCKET, Key=key, Body=body, ContentType='application/json')
+            print(f"Written {len(records)} records → s3://{BUCKET}/{key}")
+            return {'statusCode': 200, 'body': f'Exported {len(records)} records'}
+
+  # ── 6. Glue Database (Athena uses this as its catalog) ───────────────────────
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: bi_pipeline_db
+        Description: BI Pipeline database — orders exported from DynamoDB via Lambda
+
+  # ── 7. Athena Workgroup ──────────────────────────────────────────────────────
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub '${ProjectName}-workgroup'
+      State: ENABLED
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${AthenaResultsBucket}/results/'
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: 1073741824   # 1 GB scan limit per query
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OUTPUTS
+# ──────────────────────────────────────────────────────────────────────────────
+Outputs:
+  DynamoDBTableName:
+    Description: Name of the DynamoDB orders table
+    Value: !Ref OrdersTable
+    Export:
+      Name: !Sub '${ProjectName}-orders-table'
+
+  DataBucketName:
+    Description: S3 bucket acting as the data lake
+    Value: !Ref DataBucket
+    Export:
+      Name: !Sub '${ProjectName}-data-bucket'
+
+  AthenaResultsBucketName:
+    Description: S3 bucket for Athena query results
+    Value: !Ref AthenaResultsBucket
+
+  LambdaFunctionName:
+    Description: Lambda function that streams DynamoDB data to S3
+    Value: !Ref DynamoToS3Function
+
+  GlueDatabaseName:
+    Description: Glue catalog database used by Athena
+    Value: !Ref GlueDatabase
+
+  AthenaWorkgroupName:
+    Description: Athena workgroup name
+    Value: !Ref AthenaWorkgroup

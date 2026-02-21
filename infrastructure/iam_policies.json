@@ -1,0 +1,184 @@
+{
+    "Version": "2012-10-17",
+    "Roles": [
+        {
+            "RoleName": "LambdaDynamoDBToS3Role",
+            "Description": "Assumed by Lambda. Allows reading DynamoDB Streams and writing exported data to S3.",
+            "AssumeRolePolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": "lambda.amazonaws.com"
+                        },
+                        "Action": "sts:AssumeRole"
+                    }
+                ]
+            },
+            "Policies": [
+                {
+                    "PolicyName": "DynamoDBStreamReadPolicy",
+                    "Statement": [
+                        {
+                            "Sid": "ReadDynamoDBStreams",
+                            "Effect": "Allow",
+                            "Action": [
+                                "dynamodb:GetRecords",
+                                "dynamodb:GetShardIterator",
+                                "dynamodb:DescribeStream",
+                                "dynamodb:ListStreams"
+                            ],
+                            "Resource": "arn:aws:dynamodb:us-east-1:<ACCOUNT_ID>:table/orders-table/stream/*"
+                        }
+                    ]
+                },
+                {
+                    "PolicyName": "S3WritePolicy",
+                    "Statement": [
+                        {
+                            "Sid": "WriteToS3Bucket",
+                            "Effect": "Allow",
+                            "Action": [
+                                "s3:PutObject",
+                                "s3:GetObject",
+                                "s3:DeleteObject"
+                            ],
+                            "Resource": "arn:aws:s3:::bi-pipeline-data-bucket/orders/*"
+                        }
+                    ]
+                },
+                {
+                    "PolicyName": "CloudWatchLogsPolicy",
+                    "Statement": [
+                        {
+                            "Sid": "CreateAndWriteLogs",
+                            "Effect": "Allow",
+                            "Action": [
+                                "logs:CreateLogGroup",
+                                "logs:CreateLogStream",
+                                "logs:PutLogEvents"
+                            ],
+                            "Resource": "arn:aws:logs:us-east-1:<ACCOUNT_ID>:log-group:/aws/lambda/*"
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "RoleName": "AthenaQueryRole",
+            "Description": "Used by Athena to query S3 data and store query results. Also assumed by QuickSight.",
+            "AssumeRolePolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": [
+                                "athena.amazonaws.com",
+                                "quicksight.amazonaws.com"
+                            ]
+                        },
+                        "Action": "sts:AssumeRole"
+                    }
+                ]
+            },
+            "Policies": [
+                {
+                    "PolicyName": "AthenaS3AccessPolicy",
+                    "Statement": [
+                        {
+                            "Sid": "S3ReadDataAndWriteResults",
+                            "Effect": "Allow",
+                            "Action": [
+                                "s3:GetObject",
+                                "s3:ListBucket",
+                                "s3:PutObject"
+                            ],
+                            "Resource": [
+                                "arn:aws:s3:::bi-pipeline-data-bucket",
+                                "arn:aws:s3:::bi-pipeline-data-bucket/*",
+                                "arn:aws:s3:::bi-pipeline-athena-results",
+                                "arn:aws:s3:::bi-pipeline-athena-results/*"
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "PolicyName": "AthenaExecutionPolicy",
+                    "Statement": [
+                        {
+                            "Sid": "AllowAthenaQueries",
+                            "Effect": "Allow",
+                            "Action": [
+                                "athena:StartQueryExecution",
+                                "athena:GetQueryExecution",
+                                "athena:GetQueryResults",
+                                "athena:StopQueryExecution",
+                                "athena:ListWorkGroups"
+                            ],
+                            "Resource": "*"
+                        }
+                    ]
+                },
+                {
+                    "PolicyName": "GlueCatalogAccessPolicy",
+                    "Statement": [
+                        {
+                            "Sid": "ReadGlueCatalog",
+                            "Effect": "Allow",
+                            "Action": [
+                                "glue:GetDatabase",
+                                "glue:GetTable",
+                                "glue:GetTables",
+                                "glue:GetPartition",
+                                "glue:GetPartitions",
+                                "glue:BatchGetPartition"
+                            ],
+                            "Resource": [
+                                "arn:aws:glue:us-east-1:<ACCOUNT_ID>:catalog",
+                                "arn:aws:glue:us-east-1:<ACCOUNT_ID>:database/bi_pipeline_db",
+                                "arn:aws:glue:us-east-1:<ACCOUNT_ID>:table/bi_pipeline_db/*"
+                            ]
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            "RoleName": "QuickSightServiceRole",
+            "Description": "Assumed by QuickSight to read Athena query results from S3 and describe resources.",
+            "AssumeRolePolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": "quicksight.amazonaws.com"
+                        },
+                        "Action": "sts:AssumeRole"
+                    }
+                ]
+            },
+            "Policies": [
+                {
+                    "PolicyName": "QuickSightS3Policy",
+                    "Statement": [
+                        {
+                            "Sid": "AllowQuickSightS3Access",
+                            "Effect": "Allow",
+                            "Action": [
+                                "s3:GetObject",
+                                "s3:ListBucket"
+                            ],
+                            "Resource": [
+                                "arn:aws:s3:::bi-pipeline-athena-results",
+                                "arn:aws:s3:::bi-pipeline-athena-results/*"
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}
