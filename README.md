@@ -42,7 +42,31 @@ aws-serverless-bi-pipeline/
     ├── create_glue_catalog.sql # Athena DDL for table creation
     └── quicksight_views.sql    # Business SQL views for visualization
 ```
+Serverless BI Architecture: Delivering Real-Time Insights from NoSQL Data This project demonstrates a modernized approach to Business Intelligence. Instead of building complex, brittle, and expensive **ETL** (Extract, Transform, Load) pipelines to move data from a NoSQL database into a data warehouse, this architecture uses **AWS** Federated Query to analyze operational data in place.
 
+## Data Source: Amazon DynamoDB (The Operational Foundation)
+
+The **BIE** Angle: DynamoDB houses the live, transactional application data. By querying this directly, we eliminate data latency. Business stakeholders get access to near real-time metrics instead of waiting for a 24-hour batch **ETL** job to complete.
+
+## Data Cataloging: AWS Glue (Schema-on-Read Definition)
+
+The **BIE** Angle: BIEs live in **SQL**, but DynamoDB is a key-value/document store. **AWS** Glue bridges this gap. It acts as the metadata repository, applying a structured, relational schema over the NoSQL data so that it can be queried exactly like a traditional **SQL** table.
+
+## Federated Query Bridge: AWS Lambda Connector (Invent and Simplify)
+
+The **BIE** Angle: This is where we replace traditional **ETL**. Instead of moving data, Athena uses this Lambda function to push **SQL** queries down to the DynamoDB source. Lambda translates the **SQL** into native DynamoDB **API** calls, retrieves the specific data needed, and formats it for analysis, drastically reducing infrastructure overhead.
+
+## Bypassing Limits: Amazon S3 Spill Bucket (Ensuring Reliability at Scale)
+
+The **BIE** Angle: BI queries often involve heavy aggregations (e.g., Year-to-Date sales) that return massive datasets. **AWS** Lambda has a hard 6 MB payload limit. To ensure business dashboards never break during large queries, this architecture automatically *spills* data exceeding 6 MB into an S3 bucket. Athena seamlessly stitches the Lambda response and S3 data together, guaranteeing reliable query execution for end-users regardless of data volume.
+
+## Query Execution: Amazon Athena (The Analytical Engine)
+
+The **BIE** Angle: Athena (built on Presto/Trino) serves as the core analytical engine. This is where the **BIE** writes optimized **ANSI** **SQL** to create views, perform complex joins, and aggregate the raw DynamoDB data into meaningful business metrics without provisioning any servers.
+
+## Visualization & BI: Amazon QuickSight (Driving Business Decisions)
+
+The **BIE** Angle: This is the customer-facing layer. QuickSight connects directly to Athena to ingest the processed data (often utilizing **SPICE** for faster performance). It translates the **SQL** outputs into interactive, self-service dashboards, enabling business leaders to track KPIs and make data-driven decisions instantly.
 ## 🚀 Getting Started
 
 ### 1. Deploy Infrastructure
